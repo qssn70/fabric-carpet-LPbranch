@@ -31,10 +31,14 @@ import net.minecraft.util.registry.RegistryKey;
 import net.minecraft.world.GameMode;
 import net.minecraft.world.World;
 
+import net.luckperms.api.LuckPerms;
+import net.luckperms.api.LuckPermsProvider;
+
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.UUID;
 
 import static net.minecraft.server.command.CommandManager.argument;
 import static net.minecraft.server.command.CommandManager.literal;
@@ -248,53 +252,74 @@ public class PlayerCommand
         }
     }
 
-    private static int spawn(CommandContext<ServerCommandSource> context) throws CommandSyntaxException
-    {
-        if (cantSpawn(context)) return 0;
-        ServerCommandSource source = context.getSource();
-        Vec3d pos = tryGetArg(
-                () -> Vec3ArgumentType.getVec3(context, "position"),
-                source::getPosition
-        );
-        Vec2f facing = tryGetArg(
-                () -> RotationArgumentType.getRotation(context, "direction").toAbsoluteRotation(context.getSource()),
-                source::getRotation
-        );
-        RegistryKey<World> dimType = tryGetArg(
-                () -> DimensionArgumentType.getDimensionArgument(context, "dimension").getRegistryKey(),
-                () -> source.getWorld().getRegistryKey() // dimension.getType()
-        );
-        GameMode mode = GameMode.CREATIVE;
-        boolean flying = false;
-        try
-        {
-            ServerPlayerEntity player = context.getSource().getPlayer();
-            mode = player.interactionManager.getGameMode();
-            flying = player.abilities.flying;
-        }
-        catch (CommandSyntaxException ignored) {}
-        String playerName = StringArgumentType.getString(context, "player");
-        if (playerName.length()>maxPlayerLength(source.getMinecraftServer()))
-        {
-            Messenger.m(context.getSource(), "rb Player name: "+playerName+" is too long");
-            return 0;
-        }
+private static int spawn(CommandContext<ServerCommandSource> context) throws CommandSyntaxException {
+    if (cantSpawn(context)) return 0;
+    ServerCommandSource source = context.getSource();
+    Vec3d pos = tryGetArg(
+            () -> Vec3ArgumentType.getVec3(context, "position"),
+            source::getPosition
+    );
+    Vec2f facing = tryGetArg(
+            () -> RotationArgumentType.getRotation(context, "direction").toAbsoluteRotation(source),
+            source::getRotation
+    );
+    RegistryKey<World> dimType = tryGetArg(
+            () -> DimensionArgumentType.getDimensionArgument(context, "dimension").getRegistryKey(),
+            () -> source.getWorld().getRegistryKey()
+    );
 
-        MinecraftServer server = source.getMinecraftServer();
-        if (!World.isInBuildLimit(new BlockPos(pos.x, pos.y, pos.z)))
-        {
-            Messenger.m(context.getSource(), "rb Player "+playerName+" cannot be placed outside of the world");
-            return 0;
-        }
-        PlayerEntity player = EntityPlayerMPFake.createFake(playerName, server, pos.x, pos.y, pos.z, facing.y, facing.x, dimType, mode, flying);
-        if (player == null)
-        {
-            Messenger.m(context.getSource(), "rb Player " + StringArgumentType.getString(context, "player") + " doesn't exist " +
-                    "and cannot spawn in online mode. Turn the server offline to spawn non-existing players");
-            return 0;
-        }
-        return 1;
+    GameMode mode = GameMode.CREATIVE;
+    boolean flying = false;
+    try {
+        ServerPlayerEntity player = context.getSource().getPlayer();
+        mode = player.interactionManager.getGameMode();
+        flying = player.abilities.flying;
+    } catch (CommandSyntaxException ignored) {}
+
+    String playerName = StringArgumentType.getString(context, "player");
+    if (playerName.length() > maxPlayerLength(source.getMinecraftServer())) {
+        Messenger.m(context.getSource(), "rb Player name: " + playerName + " is too long");
+        return 0;
     }
+
+    MinecraftServer server = source.getMinecraftServer();
+    if (!World.isInBuildLimit(new BlockPos(pos.x, pos.y, pos.z))) {
+        Messenger.m(context.getSource(), "rb Player " + playerName + " cannot be placed outside of the world");
+        return 0;
+    }
+
+    // ===== LuckPerms 假人预加载 START =====
+    try {
+        UUID uuid = PlayerEntity.getOfflinePlayerUuid(playerName);
+        LuckPerms lp = LuckPermsProvider.get();
+        lp.getUserManager().loadUser(uuid, playerName).join();
+        lp.getContextManager().getStaticQueryOptions(); // 确保有默认上下文
+        CarpetSettings.LOG.info("[LP] Preloaded LuckPerms data for fake player: {}", playerName);
+    } catch (Exception e) {
+        CarpetSettings.LOG.error("[LP] Failed to preload fake player data", e);
+    }
+    // ===== LuckPerms 假人预加载 END =====
+
+    PlayerEntity player = EntityPlayerMPFake.createFake(
+            playerName, server,
+            pos.x, pos.y, pos.z,
+            facing.y, facing.x,
+            dimType, mode, flying
+    );
+
+    if (player == null) {
+        Messenger.m(context.getSource(), "rb Player " + playerName +
+                " doesn't exist and cannot spawn in online mode. Turn the server offline to spawn non-existing players");
+        return 0;
+    }
+
+    if (player instanceof ServerPlayerEntity) {
+        carpet.integrations.LuckPermsIntegration.onFakePlayerSpawn(server, (ServerPlayerEntity) player);
+    }
+
+    return 1;
+}
+
 
     private static int maxPlayerLength(MinecraftServer server)
     {
